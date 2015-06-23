@@ -32,13 +32,18 @@ ZEND_DECLARE_MODULE_GLOBALS(fdatabase)
 */
 
 /* True global resources - no need for thread safety here */
+/*
+定义全局变量，存储文件名柄，数据存储路径，数据库名，索引文件数据
+*/
 static int le_fdatabase;
 FILE *file_handle;
 zval GBstore_uri,GBdbname;
 HashTable *dbIndexContent;
 
 //zval *dbIndexContent;
+/*定义索引文件名称*/
 const char *indexFile = "fdb_index.idx";
+/* 定义状态集合，用来记录数据存储路径和DB名有效性的状态,都为1，说明通过 */
 typedef struct{
 	int checkStore;
 	int checkDB;
@@ -48,11 +53,10 @@ CK mycheck;
 
 /* {{{ fdatabase_functions[]
  *
- * Every user visible function must have an entry in fdatabase_functions[].
+ * 这里是用来定义此扩展声明方法的入口,例如如果想让此扩展提供xxx()方法，则这么写PHP_FE(xxx,	NULL)
  */
 const zend_function_entry fdatabase_functions[] = {
 	PHP_FE(confirm_fdatabase_compiled,	NULL)		/* For testing, remove later. */
-	PHP_FE(addColumns,NULL)
 	PHP_FE_END	/* Must be the last line in fdatabase_functions[] */
 };
 /* }}} */
@@ -65,11 +69,11 @@ zend_module_entry fdatabase_module_entry = {
 #endif
 	"fdatabase",
 	fdatabase_functions,
-	PHP_MINIT(fdatabase),
-	PHP_MSHUTDOWN(fdatabase),
-	PHP_RINIT(fdatabase),		/* Replace with NULL if there's nothing to do at request start */
-	PHP_RSHUTDOWN(fdatabase),	/* Replace with NULL if there's nothing to do at request end */
-	PHP_MINFO(fdatabase),
+	PHP_MINIT(fdatabase),//扩展被加载时调用,php-fpm启动后
+	PHP_MSHUTDOWN(fdatabase),//扩展被卸载后调用,php-fpm关闭后
+	PHP_RINIT(fdatabase),		/* 当有请求时调用 */
+	PHP_RSHUTDOWN(fdatabase),	/* 请求结束时调用 */
+	PHP_MINFO(fdatabase),	 /*模块信息的展示,phpinfo()中的信息*/
 #if ZEND_MODULE_API_NO >= 20010901
 	PHP_FDATABASE_VERSION,
 #endif
@@ -81,6 +85,7 @@ zend_module_entry fdatabase_module_entry = {
 ZEND_GET_MODULE(fdatabase)
 #endif
 
+/* 检查文件是否存在并且可写 */
 int check_file_exists(char *filename){
 	if(access(filename,0) == -1 || access(filename,6) == -1){
 		return 0;
@@ -89,6 +94,7 @@ int check_file_exists(char *filename){
 	return 1;
 }
 
+/* 创建文件 */
 int create_file(char *filename){
 	file_handle = fopen(filename,"a+");
 	fclose(file_handle);
@@ -96,6 +102,7 @@ int create_file(char *filename){
 	return 0;
 }
 
+/* 加载文件内容，并装入HashTable返回 */
 HashTable *load_index(char *filename){
 	char chr;
 	char *current,*currentval;
@@ -112,12 +119,12 @@ HashTable *load_index(char *filename){
     //分配内存
     ALLOC_HASHTABLE(ht);
             
-    //初始化
+    //初始化HastTable
     if (zend_hash_init(ht, 50, NULL,ZVAL_PTR_DTOR, 0) == FAILURE) {
         FREE_HASHTABLE(ht);
         return FAILURE;
     }
-
+    /* c里面没有找到什么好的split函数，索性自己写了，功能就是把kkkkk|vvvvv这种数据解析到hashtable中 */
 	while(!feof(file_handle)){
 		chr=fgetc(file_handle);
 		if(chr == '|' && worddh == 0){
@@ -125,11 +132,15 @@ HashTable *load_index(char *filename){
 			*current = '\0';
 			current = current - count;
 		}else if(chr == '\n'){
+			//给fooval分配空间并初始化数据
 			MAKE_STD_ZVAL(fooval);
 			*currentval = '\0';
 			currentval = currentval - countval;
+			//给fooval赋值，参数依次是，变量，值，值的长度，是否是把内存中数据copy一份给fooval,1是
 		    ZVAL_STRINGL(fooval, currentval,countval ,1);
+		    //初始化一个字符串，zend框架的方法，想在内存管理上省事，就多用zend提供的方法吧
 		    key = estrndup(current,count);
+		    //添加数据到hashtable中
 			zend_hash_add(ht,key,count,&fooval,sizeof(zval*),NULL);
 			countval = 0;
 			count = 0;
@@ -152,6 +163,7 @@ HashTable *load_index(char *filename){
 	return ht;
 }
 
+/* 把数据写入到文件中，此方法是zend_hash_apply_with_arguments的回调方法，zend提供的遍历hashtable的方法 */
 int write_file_with_key(zval **val,int num_args,va_list args,zend_hash_key *hash_key){
 	zval tcopy = **val;
 	char *uri,*mdbname;
@@ -192,6 +204,7 @@ int write_file_with_key(zval **val,int num_args,va_list args,zend_hash_key *hash
 	return ZEND_HASH_APPLY_KEEP;
 }
 
+/* 置空文件 */
 int set_empty_file(char *filename){
 	file_handle = fopen(filename,"w+");
 	fclose(file_handle);
@@ -240,9 +253,12 @@ ZEND_METHOD(fdb,__construct){
 	zend_class_entry *cl;
 	char *IFD;
 
+	//我自己把他理解成class里里获取self
 	cl = Z_OBJCE_P(getThis());
 
+	//获取用户传递的参数,z的意思，获取的数据是个zval类型的，也可以用s,但z可以接收更多类型的数据
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &store_uri) == FAILURE) {
+		//抛出一个warning类型的错误，好爽，在内核中真是为所欲为啊。。。
 		php_error_docref(NULL TSRMLS_CC,E_WARNING,"store uri is required");
 		RETURN_NULL();
 	}
@@ -253,6 +269,7 @@ ZEND_METHOD(fdb,__construct){
 	zval_dtor(&tcopy);
 
 	GBstore_uri = *store_uri;
+	//zend 中更新类属性的方法
 	zend_update_property(cl,getThis(),"store_uri",sizeof("store_uri")-1,store_uri TSRMLS_CC);
 
 	IFD = estrndup(Z_STRVAL(GBstore_uri),Z_STRLEN(GBstore_uri)+100);
@@ -289,6 +306,7 @@ ZEND_METHOD(fdb,delete){
     zend_hash_init(dbcontent, 100, NULL,ZVAL_PTR_DTOR, 0);
     dbcontent = load_index(uri);
 
+    //hash删除方法，索引名称，key名，key的长度
     if(zend_hash_del(dbcontent, Z_STRVAL_P(pkey),Z_STRLEN_P(pkey)) == FAILURE){
     	php_error_docref(NULL TSRMLS_CC,E_WARNING,"delete faild!");
     	RETURN_FALSE;
@@ -318,6 +336,7 @@ ZEND_METHOD(fdb,get){
 
 	//Get database content
     ALLOC_HASHTABLE(dbcontent);
+    //初始化hashtable,hashtable指针，存储的数量，第3个没用了，修改hashtable时候的回调函数，是否永存于内存
     zend_hash_init(dbcontent, 100, NULL,ZVAL_PTR_DTOR, 0);
     dbcontent = load_index(uri);
 
@@ -392,6 +411,7 @@ ZEND_METHOD(fdb,setDb){
 	efree(mdbname);
 }
 
+//声明fdb这个类的方法
 static zend_function_entry fdb_method[] = {
 	ZEND_ME(fdb,__construct,NULL,ZEND_ACC_PUBLIC|ZEND_ACC_CTOR)
 	ZEND_ME(fdb,store,NULL,ZEND_ACC_PUBLIC)
@@ -434,10 +454,12 @@ PHP_MINIT_FUNCTION(fdatabase)
 	mycheck.checkStore = 0;mycheck.checkDB = 0;
 	//MAKE_STD_ZVAL(dbIndexContent);
 
+	//声明fdb这个类
 	zend_class_entry ce;
 	INIT_CLASS_ENTRY(ce,"fdb",fdb_method);
 	fdb = zend_register_internal_class(&ce TSRMLS_CC);
 
+	//给fdb添加两个属性
 	zend_declare_property_null(fdb,"store_uri",strlen("store_uri"),ZEND_ACC_PUBLIC TSRMLS_CC);
 	zend_declare_property_null(fdb,"dbase",strlen("dbase"),ZEND_ACC_PUBLIC TSRMLS_CC);
 	return SUCCESS;
